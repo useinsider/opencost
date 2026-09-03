@@ -76,6 +76,12 @@ func (kpmc KubePodLabelsCollector) Collect(ch chan<- prometheus.Metric) {
 	pods := kpmc.KubeClusterCache.GetAllPods()
 	disabledMetrics := kpmc.metricsConfig.GetDisabledMetricsMap()
 
+	// The whitelist is derived from controllers and services, not from the
+	// pod, so build it once per scrape rather than once per pod.
+	if kpmc.metricsConfig.UseLabelsWhitelist {
+		kpmc.UpdateWhitelist()
+	}
+
 	for _, pod := range pods {
 		podName := pod.Name
 		podNS := pod.Namespace
@@ -85,12 +91,16 @@ func (kpmc KubePodLabelsCollector) Collect(ch chan<- prometheus.Metric) {
 		if _, disabled := disabledMetrics["kube_pod_labels"]; !disabled {
 			podLabels := pod.Labels
 			if kpmc.metricsConfig.UseLabelsWhitelist {
-				kpmc.UpdateWhitelist()
-				for lname := range pod.Labels {
-					if _, ok := kpmc.labelsWhitelist[lname]; !ok {
-						delete(podLabels, lname)
+				// pod.Labels is owned by the cluster cache and shared with
+				// every other reader; filter into a copy instead of deleting
+				// from it in place.
+				filtered := make(map[string]string, len(pod.Labels))
+				for lname, lvalue := range pod.Labels {
+					if _, ok := kpmc.labelsWhitelist[lname]; ok {
+						filtered[lname] = lvalue
 					}
 				}
+				podLabels = filtered
 			}
 
 			labelNames, labelValues := promutil.KubePrependQualifierToLabels(promutil.SanitizeLabels(podLabels), "label_")

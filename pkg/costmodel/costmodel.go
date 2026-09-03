@@ -1385,9 +1385,24 @@ func (cm *CostModel) GetLBCost() (map[serviceKey]*costAnalyzerCloud.LoadBalancer
 	return loadBalancerMap, nil
 }
 
+// podsByNamespace buckets the pod list by namespace so that selector
+// matching for namespaced owners (services, deployments, statefulsets) only
+// visits pods that can actually match. Without this the mapping functions
+// below are O(owners x pods) across the whole cluster on every call, which on
+// a multi-tenant cluster (tens of thousands of services and pods) costs tens
+// of seconds of CPU per metrics-emitter tick.
+func podsByNamespace(podList []*clustercache.Pod) map[string][]*clustercache.Pod {
+	byNS := make(map[string][]*clustercache.Pod)
+	for _, pod := range podList {
+		byNS[pod.Namespace] = append(byNS[pod.Namespace], pod)
+	}
+	return byNS
+}
+
 func getPodServices(cache clustercache.ClusterCache, podList []*clustercache.Pod, clusterID string) (map[string]map[string][]string, error) {
 	servicesList := cache.GetAllServices()
 	podServicesMapping := make(map[string]map[string][]string)
+	byNS := podsByNamespace(podList)
 	for _, service := range servicesList {
 		namespace := service.Namespace
 		name := service.Name
@@ -1399,9 +1414,9 @@ func getPodServices(cache clustercache.ClusterCache, podList []*clustercache.Pod
 		if len(service.SpecSelector) > 0 {
 			s = labels.Set(service.SpecSelector).AsSelectorPreValidated()
 		}
-		for _, pod := range podList {
+		for _, pod := range byNS[namespace] {
 			labelSet := labels.Set(pod.Labels)
-			if s.Matches(labelSet) && pod.Namespace == namespace {
+			if s.Matches(labelSet) {
 				services, ok := podServicesMapping[key][pod.Name]
 				if ok {
 					podServicesMapping[key][pod.Name] = append(services, name)
@@ -1417,6 +1432,7 @@ func getPodServices(cache clustercache.ClusterCache, podList []*clustercache.Pod
 func getPodStatefulsets(cache clustercache.ClusterCache, podList []*clustercache.Pod, clusterID string) (map[string]map[string][]string, error) {
 	ssList := cache.GetAllStatefulSets()
 	podSSMapping := make(map[string]map[string][]string) // namespace: podName: [deploymentNames]
+	byNS := podsByNamespace(podList)
 	for _, ss := range ssList {
 		namespace := ss.Namespace
 		name := ss.Name
@@ -1429,9 +1445,9 @@ func getPodStatefulsets(cache clustercache.ClusterCache, podList []*clustercache
 		if err != nil {
 			log.Errorf("Error doing deployment label conversion: %s", err.Error())
 		}
-		for _, pod := range podList {
+		for _, pod := range byNS[namespace] {
 			labelSet := labels.Set(pod.Labels)
-			if s.Matches(labelSet) && pod.Namespace == namespace {
+			if s.Matches(labelSet) {
 				sss, ok := podSSMapping[key][pod.Name]
 				if ok {
 					podSSMapping[key][pod.Name] = append(sss, name)
@@ -1448,6 +1464,7 @@ func getPodStatefulsets(cache clustercache.ClusterCache, podList []*clustercache
 func getPodDeployments(cache clustercache.ClusterCache, podList []*clustercache.Pod, clusterID string) (map[string]map[string][]string, error) {
 	deploymentsList := cache.GetAllDeployments()
 	podDeploymentsMapping := make(map[string]map[string][]string) // namespace: podName: [deploymentNames]
+	byNS := podsByNamespace(podList)
 	for _, deployment := range deploymentsList {
 		namespace := deployment.Namespace
 		name := deployment.Name
@@ -1460,9 +1477,9 @@ func getPodDeployments(cache clustercache.ClusterCache, podList []*clustercache.
 		if err != nil {
 			log.Errorf("Error doing deployment label conversion: %s", err)
 		}
-		for _, pod := range podList {
+		for _, pod := range byNS[namespace] {
 			labelSet := labels.Set(pod.Labels)
-			if s.Matches(labelSet) && pod.Namespace == namespace {
+			if s.Matches(labelSet) {
 				deployments, ok := podDeploymentsMapping[key][pod.Name]
 				if ok {
 					podDeploymentsMapping[key][pod.Name] = append(deployments, name)
