@@ -75,10 +75,12 @@ func (kpmc *KubePodLabelsCollector) UpdateWhitelist() {
 func (kpmc KubePodLabelsCollector) Collect(ch chan<- prometheus.Metric) {
 	pods := kpmc.KubeClusterCache.GetAllPods()
 	disabledMetrics := kpmc.metricsConfig.GetDisabledMetricsMap()
+	_, podLabelsDisabled := disabledMetrics["kube_pod_labels"]
 
 	// The whitelist is derived from controllers and services, not from the
-	// pod, so build it once per scrape rather than once per pod.
-	if kpmc.metricsConfig.UseLabelsWhitelist {
+	// pod, so build it once per scrape rather than once per pod — and only
+	// when kube_pod_labels is actually emitted.
+	if !podLabelsDisabled && kpmc.metricsConfig.UseLabelsWhitelist {
 		kpmc.UpdateWhitelist()
 	}
 
@@ -88,7 +90,7 @@ func (kpmc KubePodLabelsCollector) Collect(ch chan<- prometheus.Metric) {
 		podUID := string(pod.UID)
 
 		// Pod Labels
-		if _, disabled := disabledMetrics["kube_pod_labels"]; !disabled {
+		if !podLabelsDisabled {
 			podLabels := pod.Labels
 			if kpmc.metricsConfig.UseLabelsWhitelist {
 				// pod.Labels is owned by the cluster cache and shared with
