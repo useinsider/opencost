@@ -1594,19 +1594,23 @@ func getServiceSelectorLabels(resServiceSelectorLabels []*source.ServiceLabelsRe
 func applyServicesToPods(podMap map[podKey]*pod, podLabels map[podKey]map[string]string, allocsByService map[serviceKey][]*opencost.Allocation, serviceLabels map[serviceKey]map[string]string) {
 	podServicesMap := map[podKey][]serviceKey{}
 
+	// Bucket the pods by (cluster, namespace) once; a Service only selects
+	// pods in its own namespace, so there is no reason to walk the whole
+	// cluster's pods for every service (see labelsToPodControllerMap).
+	podsByNS := make(map[podNamespaceKey][]podKey)
+	for pKey := range podLabels {
+		nsKey := podNamespaceKey{Cluster: pKey.Cluster, Namespace: pKey.Namespace}
+		podsByNS[nsKey] = append(podsByNS[nsKey], pKey)
+	}
+
 	// For each service, turn the labels into a selector and attempt to
-	// match it with each set of pod labels. A match indicates that the pod
-	// belongs to the service.
+	// match it with each set of pod labels in the same cluster and
+	// namespace. A match indicates that the pod belongs to the service.
 	for sKey, sLabels := range serviceLabels {
 		selector := labels.Set(sLabels).AsSelectorPreValidated()
 
-		for pKey, pLabels := range podLabels {
-			// If the pod is in a different cluster or namespace, there is
-			// no need to compare the labels.
-			if sKey.Cluster != pKey.Cluster || sKey.Namespace != pKey.Namespace {
-				continue
-			}
-
+		for _, pKey := range podsByNS[podNamespaceKey{Cluster: sKey.Cluster, Namespace: sKey.Namespace}] {
+			pLabels := podLabels[pKey]
 			podLabelSet := labels.Set(pLabels)
 			if selector.Matches(podLabelSet) {
 				if _, ok := podServicesMap[pKey]; !ok {

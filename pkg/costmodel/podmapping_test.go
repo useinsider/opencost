@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/opencost/opencost/core/pkg/clustercache"
+	"github.com/opencost/opencost/core/pkg/opencost"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -167,5 +168,49 @@ func BenchmarkLabelsToPodControllerMap(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		labelsToPodControllerMap(pods, ctrls)
+	}
+}
+
+func TestApplyServicesToPodsMatchesWithinNamespaceOnly(t *testing.T) {
+	podLabels, _ := buildControllerLabels(3, 4, 8)
+	serviceLabels := map[serviceKey]map[string]string{}
+	for n := 0; n < 3; n++ {
+		for s := 0; s < 4; s++ {
+			serviceLabels[newServiceKey("c1", fmt.Sprintf("ns-%d", n), fmt.Sprintf("svc-%d", s))] = map[string]string{"app": fmt.Sprintf("%d", s)}
+		}
+	}
+	podMap := map[podKey]*pod{}
+	for pKey := range podLabels {
+		podMap[pKey] = &pod{Key: pKey, Allocations: map[string]*opencost.Allocation{"c": {Properties: &opencost.AllocationProperties{}}}}
+	}
+	allocsByService := map[serviceKey][]*opencost.Allocation{}
+	applyServicesToPods(podMap, podLabels, allocsByService, serviceLabels)
+
+	for pKey, p := range podMap {
+		svcs := p.Allocations["c"].Properties.Services
+		if len(svcs) != 1 || svcs[0] != "svc-"+podLabels[pKey]["app"] {
+			t.Fatalf("pod %v: services %v", pKey, svcs)
+		}
+	}
+	if len(allocsByService) != 12 {
+		t.Fatalf("expected 12 services with allocations, got %d", len(allocsByService))
+	}
+}
+
+func BenchmarkApplyServicesToPods(b *testing.B) {
+	podLabels, _ := buildControllerLabels(300, 1, 100) // 30k pods
+	serviceLabels := map[serviceKey]map[string]string{}
+	for n := 0; n < 300; n++ {
+		for s := 0; s < 90; s++ { // 27k services
+			serviceLabels[newServiceKey("c1", fmt.Sprintf("ns-%d", n), fmt.Sprintf("svc-%d", s))] = map[string]string{"app": fmt.Sprintf("%d", s)}
+		}
+	}
+	podMap := map[podKey]*pod{}
+	for pKey := range podLabels {
+		podMap[pKey] = &pod{Key: pKey, Allocations: map[string]*opencost.Allocation{"c": {Properties: &opencost.AllocationProperties{}}}}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		applyServicesToPods(podMap, podLabels, map[serviceKey][]*opencost.Allocation{}, serviceLabels)
 	}
 }
