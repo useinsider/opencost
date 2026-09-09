@@ -70,3 +70,99 @@ func TestGenericStoreReplaceIsAtomic(t *testing.T) {
 		t.Fatalf("GetAll observed a partially populated store %d times during Replace", partial)
 	}
 }
+
+// TestGenericStoreReplaceDropsStaleItems asserts that Replace swaps the item
+// set rather than merging into it. Replace is now a standalone implementation
+// of the store contract (it no longer delegates to Add), so an item that is
+// absent from the new list must be gone from the store; otherwise a re-list
+// that observes a shrunken cluster leaves deleted pods billable forever.
+func TestGenericStoreReplaceDropsStaleItems(t *testing.T) {
+	store := NewGenericStore(cc.TransformPod)
+
+	if err := store.Replace(makePodList(10), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Replace(makePodList(3), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	all := store.GetAll()
+	if len(all) != 3 {
+		t.Fatalf("GetAll() = %d items after replacing 10 with 3, want 3", len(all))
+	}
+
+	present := make(map[types.UID]bool, len(all))
+	for _, p := range all {
+		present[p.UID] = true
+	}
+	for i := 0; i < 3; i++ {
+		uid := types.UID(fmt.Sprintf("uid-%d", i))
+		if !present[uid] {
+			t.Errorf("%s missing from store after Replace, want it kept", uid)
+		}
+	}
+	for i := 3; i < 10; i++ {
+		uid := types.UID(fmt.Sprintf("uid-%d", i))
+		if present[uid] {
+			t.Errorf("stale %s still in store after Replace, want it dropped", uid)
+		}
+	}
+}
+
+// TestGenericStoreReplaceWithEmptyListClearsStore asserts the degenerate
+// re-list case: a reflector that lists a resource with no remaining objects
+// must empty the store, not leave the previous contents in place.
+func TestGenericStoreReplaceWithEmptyListClearsStore(t *testing.T) {
+	store := NewGenericStore(cc.TransformPod)
+
+	if err := store.Replace(makePodList(10), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Replace([]any{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(store.GetAll()); n != 0 {
+		t.Fatalf("GetAll() = %d items after Replace with an empty list, want 0", n)
+	}
+
+	if err := store.Replace(makePodList(10), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Replace(nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(store.GetAll()); n != 0 {
+		t.Fatalf("GetAll() = %d items after Replace with a nil list, want 0", n)
+	}
+}
+
+// TestGenericStoreReplaceCallsOnInitOnceAfterSwap asserts the onInit hook
+// fires exactly once, and only after the initial list has been swapped in, so
+// that whatever the caller starts on init reads a fully populated store rather
+// than an empty or half-built one.
+func TestGenericStoreReplaceCallsOnInitOnceAfterSwap(t *testing.T) {
+	const size = 10
+
+	store := NewGenericStore(cc.TransformPod)
+
+	var calls int
+	var observed int
+	store.onInit = func() {
+		calls++
+		observed = len(store.GetAll())
+	}
+
+	if err := store.Replace(makePodList(size), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Replace(makePodList(size), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if calls != 1 {
+		t.Errorf("onInit called %d times, want exactly 1", calls)
+	}
+	if observed != size {
+		t.Errorf("onInit observed %d items, want the fully populated %d", observed, size)
+	}
+}
