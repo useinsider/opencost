@@ -1350,22 +1350,35 @@ func resToStatefulSetLabels(resStatefulSetLabels []*source.StatefulSetLabelsResu
 	return statefulSetLabels
 }
 
+// podNamespaceKey identifies the (cluster, namespace) bucket a pod or a
+// controller lives in. Selector matching never crosses it.
+type podNamespaceKey struct {
+	Cluster   string
+	Namespace string
+}
+
 func labelsToPodControllerMap(podLabels map[podKey]map[string]string, controllerLabels map[controllerKey]map[string]string) map[podKey]controllerKey {
 	podControllerMap := map[podKey]controllerKey{}
 
+	// Bucket the pods by (cluster, namespace) once. Without this the loop
+	// below walks EVERY pod for EVERY controller and only then discards the
+	// cross-namespace pairs — O(controllers × pods) over the whole cluster,
+	// which on a multi-tenant cluster (tens of thousands of each) is tens of
+	// seconds of CPU per allocation query.
+	podsByNS := make(map[podNamespaceKey][]podKey)
+	for pKey := range podLabels {
+		nsKey := podNamespaceKey{Cluster: pKey.Cluster, Namespace: pKey.Namespace}
+		podsByNS[nsKey] = append(podsByNS[nsKey], pKey)
+	}
+
 	// For each controller, turn the labels into a selector and attempt to
-	// match it with each set of pod labels. A match indicates that the pod
-	// belongs to the controller.
+	// match it with each set of pod labels in the same cluster and
+	// namespace. A match indicates that the pod belongs to the controller.
 	for cKey, cLabels := range controllerLabels {
 		selector := labels.Set(cLabels).AsSelectorPreValidated()
 
-		for pKey, pLabels := range podLabels {
-			// If the pod is in a different cluster or namespace, there is
-			// no need to compare the labels.
-			if cKey.Cluster != pKey.Cluster || cKey.Namespace != pKey.Namespace {
-				continue
-			}
-
+		for _, pKey := range podsByNS[podNamespaceKey{Cluster: cKey.Cluster, Namespace: cKey.Namespace}] {
+			pLabels := podLabels[pKey]
 			podLabelSet := labels.Set(pLabels)
 			if selector.Matches(podLabelSet) {
 				if _, ok := podControllerMap[pKey]; ok {

@@ -123,3 +123,49 @@ func BenchmarkGetPodDeployments(b *testing.B) {
 		}
 	}
 }
+
+// buildControllerLabels returns nsCount namespaces × perNS controllers, each
+// selecting app=<i>, and nsCount × podPerNS pods carrying app=<i mod perNS>.
+func buildControllerLabels(nsCount, perNS, podPerNS int) (map[podKey]map[string]string, map[controllerKey]map[string]string) {
+	pods := map[podKey]map[string]string{}
+	ctrls := map[controllerKey]map[string]string{}
+	for n := 0; n < nsCount; n++ {
+		ns := fmt.Sprintf("ns-%d", n)
+		for c := 0; c < perNS; c++ {
+			ctrls[newControllerKey("c1", ns, "deployment", fmt.Sprintf("dep-%d", c))] = map[string]string{"app": fmt.Sprintf("%d", c)}
+		}
+		for p := 0; p < podPerNS; p++ {
+			pods[newPodKey("c1", ns, fmt.Sprintf("pod-%d", p))] = map[string]string{"app": fmt.Sprintf("%d", p%perNS)}
+		}
+	}
+	return pods, ctrls
+}
+
+func TestLabelsToPodControllerMapMatchesWithinNamespaceOnly(t *testing.T) {
+	pods, ctrls := buildControllerLabels(3, 4, 8)
+	got := labelsToPodControllerMap(pods, ctrls)
+	if len(got) != len(pods) {
+		t.Fatalf("expected every pod matched, got %d of %d", len(got), len(pods))
+	}
+	for pKey, cKey := range got {
+		if cKey.Namespace != pKey.Namespace || cKey.Cluster != pKey.Cluster {
+			t.Fatalf("pod %v matched controller %v in another namespace", pKey, cKey)
+		}
+		if want := "dep-" + pods[pKey]["app"]; cKey.Controller != want {
+			t.Fatalf("pod %v matched %s, want %s", pKey, cKey.Controller, want)
+		}
+	}
+	// a pod in a namespace with no controllers stays unmatched
+	pods[newPodKey("c1", "lonely", "pod-x")] = map[string]string{"app": "0"}
+	if got := labelsToPodControllerMap(pods, ctrls); len(got) != len(pods)-1 {
+		t.Fatalf("pod without a same-namespace controller must stay unmatched")
+	}
+}
+
+func BenchmarkLabelsToPodControllerMap(b *testing.B) {
+	pods, ctrls := buildControllerLabels(300, 70, 100) // 21k controllers, 30k pods
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		labelsToPodControllerMap(pods, ctrls)
+	}
+}
