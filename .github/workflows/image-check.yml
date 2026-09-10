@@ -1,0 +1,91 @@
+name: Image Checker
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+jobs:
+  validate-images:
+    runs-on:
+      labels: self-hosted
+    steps:
+      - name: Create GitHub App token
+        id: github-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.InsiderActionsApplication_APP_ID }}
+          private-key: ${{ secrets.InsiderActionsApplication_PRIVATE_KEY }}
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate ECR Images in Dockerfiles and Compose files
+        run: |
+          error=0
+
+          echo "🔎 Checking Dockerfiles for ECR images..."
+          dockerfiles=$(find . -type f \( -iname "dockerfile" -o -iname "dockerfile.*" -o -iname "*.dockerfile" \))
+
+          if [ -z "$dockerfiles" ]; then
+            echo "ℹ️ No Dockerfiles found."
+          else
+            for file in $dockerfiles; do
+              echo "👉 Checking $file ..."
+              while read -r line; do
+                if [[ $line =~ ^[[:space:]]*[Ff][Rr][Oo][Mm] ]]; then
+                  # FROM with optional --platform=... support
+                  image_name=$(echo "$line" | sed -n 's/^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]*\(--platform=[^[:space:]]*[[:space:]]*\)\{0,1\}\([^[:space:]]*\).*/\2/p')
+
+                  # Skip environment variable references ($VAR, ${VAR}, "$VAR", "${VAR}", '$VAR', '${VAR}')
+                  if [[ $image_name =~ ^\$ ]] || [[ $image_name =~ ^\"\$ ]] || [[ $image_name =~ ^\'\$ ]]; then
+                    echo "  ⏭️ Skipping variable: $image_name"
+                    continue
+                  fi
+
+                  # Check for ECR
+                  if [[ $image_name =~ ^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/ ]]; then
+                    echo "  ✅ Valid ECR image: $image_name"
+                  else
+                    echo "  ❌ ERROR: Non-ECR image in $file: $line"
+                    error=1
+                  fi
+                fi
+              done < "$file"
+            done
+          fi
+
+          echo "🔎 Checking Docker Compose files for ECR images..."
+          compose_files=$(find . -type f \( -iname "*compose*.yml" -o -iname "*compose*.yaml" \))
+
+          if [ -z "$compose_files" ]; then
+            echo "ℹ️ No Docker Compose files found."
+          else
+            for file in $compose_files; do
+              echo "👉 Checking $file ..."
+              while read -r line; do
+                if [[ $line =~ ^[[:space:]]*image[[:space:]]*: ]]; then
+                  image_name=$(echo "$line" | sed -n 's/.*image[[:space:]]*:[[:space:]]*\([^[:space:]]*\).*/\1/p')
+
+                  # Skip environment variable references ($VAR, ${VAR}, "$VAR", "${VAR}", '$VAR', '${VAR}')
+                  if [[ $image_name =~ ^\$ ]] || [[ $image_name =~ ^\"\$ ]] || [[ $image_name =~ ^\'\$ ]]; then
+                    echo "  ⏭️ Skipping variable: $image_name"
+                    continue
+                  fi
+
+                  # Check for ECR
+                  if [[ $image_name =~ ^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/ ]]; then
+                    echo "  ✅ Valid ECR image: $image_name"
+                  else
+                    echo "  ❌ ERROR: Non-ECR image in $file: $line"
+                    error=1
+                  fi
+                fi
+              done < "$file"
+            done
+          fi
+
+          if [[ $error -ne 0 ]]; then
+            echo "🚨 Check failed: Non-AWS private ECR images found."
+            exit 1
+          else
+            echo "✅ All images are from AWS private ECR."
+          fi
